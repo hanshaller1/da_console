@@ -17,6 +17,18 @@ const expMap = (v, lo, hi) => lo * Math.pow(hi / lo, v);
 const softclip = (x) => (x > 3 ? 1 : x < -3 ? -1 : (x * (27 + x * x)) / (27 + 9 * x * x));
 const hann = (p) => 0.5 - 0.5 * Math.cos(TAU * p);
 
+// A noise floor around -240 dBFS. Added in front of every module so that
+// recursive filters and feedback loops never decay into denormal numbers
+// during silence, which makes JS DSP several times slower on x86.
+let dnSeed = 22222;
+function antiDenormal(L, R, n) {
+  for (let i = 0; i < n; i++) {
+    dnSeed = (dnSeed * 1664525 + 1013904223) >>> 0;
+    const d = (dnSeed / 4294967296 - 0.5) * 1e-12;
+    L[i] += d; R[i] += d;
+  }
+}
+
 /* ---------------------------------------------------------------- */
 /* Building blocks                                                   */
 /* ---------------------------------------------------------------- */
@@ -316,11 +328,14 @@ class Vibrato {
   process(L, R, n, p) {
     const inc = rateHz(p.rate) / SR;
     const depth = 0.0045 * SR * p.amount;
+    // the modulation swings by up to 1.5 * depth, so the centre delay has to
+    // sit above that or the read head hits the write head (flat spots)
+    const centre = 0.002 * SR + 1.5 * depth;
     for (let i = 0; i < n; i++) {
       const wv = this.w.next() * p.drift;
       this.ph += inc * (1 + wv * 0.6); if (this.ph >= 1) this.ph -= 1;
       const m = Math.sin(TAU * this.ph);
-      const d = 0.006 * SR + depth * m + depth * 0.5 * wv;
+      const d = centre + depth * m + depth * 0.5 * wv;
       const l = this.d[0].tap(d), r = this.d[1].tap(d);
       this.d[0].push(L[i]); this.d[1].push(R[i]);
       L[i] = l; R[i] = r;
@@ -487,6 +502,8 @@ class Space {
     this.damp = FDN_MS.map(() => new LP1(6500));
     this.ap = [4.7, 3.6, 12.7, 9.3].map((ms) => new Allpass(Math.round((ms / 1000) * SR), 0.65));
     this.o = new Float64Array(8);
+    this.gains = new Float64Array(8);
+    this.base = FDN_MS.map((ms) => (ms / 1000) * SR);
     this.sz = 1; this.ph = 0;
     this.sign = [1, -1, 1, -1, -1, 1, -1, 1];
   }
@@ -495,8 +512,8 @@ class Space {
     const size = 0.35 + p.time * 2.4;
     const freeze = p.amount > 0.97;
     const rt = 0.4 + p.amount * p.amount * 22;
-    const gains = new Float64Array(8);
-    const base = FDN_MS.map((ms) => (ms / 1000) * SR);
+    // preallocated: no garbage on the audio thread
+    const gains = this.gains, base = this.base;
     for (let k = 0; k < 8; k++) gains[k] = freeze ? 0.9995 : Math.pow(10, (-3 * base[k] * this.sz) / (rt * SR));
     const modA = 2 + p.drift * 14;
     const inGain = freeze ? 0.05 : 1;
@@ -803,7 +820,14 @@ class Module {
       this.sel = this.pending; this.pending = -1;
       this.fx[this.sel].reset();
     }
-    if (this.bypassed && this.byG <= 0 && this.pending < 0) return;
+    if (this.bypassed && this.byG <= 0 && this.pending < 0) { this.asleep = true; return; }
+    if (this.asleep) {
+      // the effect was frozen while bypassed; without a reset its delay lines
+      // would replay audio from whenever the module was switched off
+      this.asleep = false;
+      this.fx[this.sel].reset();
+    }
+    antiDenormal(L, R, n);
     if (this.dl.length < n) { this.dl = new Float32Array(n); this.dr = new Float32Array(n); }
     const dl = this.dl, dr = this.dr;
     dl.set(L.subarray(0, n)); dr.set(R.subarray(0, n));
@@ -876,7 +900,13 @@ class Capture {
     this.short = this.len < 2 * SR;
     this.state = 'play'; this.pos = 0;
   }
-  stop() { this.state = 'stopping'; }
+  stop() {
+    // a stop during recording discards the take; reading the half-written
+    // buffer with len = 0 would divide by zero and inject NaN
+    if (this.state === 'rec') { this.state = 'idle'; this.len = 0; return; }
+    if (this.state === 'play') this.state = 'stopping';
+  }
+  clear() { this.state = 'idle'; this.len = 0; this.pos = 0; this.gain = 0; }
   write(L, R, n) {
     if (this.state !== 'rec') return;
     for (let i = 0; i < n && this.len < this.max; i++) { this.l[this.len] = L[i]; this.r[this.len] = R[i]; this.len++; }
@@ -884,6 +914,7 @@ class Capture {
   }
   add(L, R, n) {
     if (this.state === 'idle' || this.state === 'rec') return;
+    if (this.len < 8) { this.clear(); return; }
     const len = this.len, fade = Math.min(this.fade, len >> 2);
     for (let i = 0; i < n; i++) {
       if (this.state === 'stopping') { this.gain -= 1 / (0.05 * SR); if (this.gain <= 0) { this.gain = 0; this.state = 'idle'; this.len = 0; return; } }
@@ -925,17 +956,22 @@ const DEFAULTS = {
   mix: 1, output: 0.714,
 };
 
+const makeModules = () => [
+  new CharacterModule([new Drive(), new Sweeten(), new Fuzz(), new Howl(), new Swell()]),
+  new Module([new Doubler(), new Vibrato(), new Phaser(), new Tremolo(), new Pitch()]),
+  new Module([new Cascade(), new Reels(), new Space(), new Collage(), new Reverse()]),
+  new Module([new Filter(), new Squash(), new Cassette(), new Broken(), new Interference()]),
+];
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const isModIndex = (m) => Number.isInteger(m) && m >= 0 && m < 4;
+const isOrder = (o) => Array.isArray(o) && o.length === 4 && [0, 1, 2, 3].every((k) => o.indexOf(k) >= 0);
+
 class ChromaProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.P = Object.assign({}, DEFAULTS);
     this.S = Object.assign({}, DEFAULTS);
-    this.mods = [
-      new CharacterModule([new Drive(), new Sweeten(), new Fuzz(), new Howl(), new Swell()]),
-      new Module([new Doubler(), new Vibrato(), new Phaser(), new Tremolo(), new Pitch()]),
-      new Module([new Cascade(), new Reels(), new Space(), new Collage(), new Reverse()]),
-      new Module([new Filter(), new Squash(), new Cassette(), new Broken(), new Interference()]),
-    ];
+    this.mods = makeModules();
     this.pc = { amount: 0, vol: 0, tilt: 0, sens: 0 };
     this.pm = { amount: 0, vol: 0, rate: 0, drift: 0 };
     this.pd = { amount: 0, vol: 0, time: 0, drift: 0 };
@@ -951,14 +987,29 @@ class ChromaProcessor extends AudioWorkletProcessor {
   }
 
   msg(m) {
+    if (!m || typeof m !== 'object') return;
     switch (m.type) {
-      case 'params': Object.assign(this.P, m.data); break;
-      case 'select': this.mods[m.module].select(m.effect); break;
-      case 'moduleBypass': this.mods[m.module].bypassed = !!m.on; break;
-      case 'order': if (Array.isArray(m.order) && m.order.length === 4) this.order = m.order.slice(); break;
+      case 'params': {
+        // only known, finite values: a single NaN in the smoothed parameter
+        // set would poison every filter state and silence the pedal for good
+        const d = m.data || {};
+        for (const k in d) {
+          if (!hasOwn(DEFAULTS, k)) continue;
+          const v = d[k];
+          if (typeof v === 'number' && Number.isFinite(v)) this.P[k] = clamp(v, 0, 1);
+        }
+        break;
+      }
+      case 'select': {
+        const mod = isModIndex(m.module) ? this.mods[m.module] : null;
+        if (mod && Number.isInteger(m.effect) && m.effect >= 0 && m.effect < mod.fx.length) mod.select(m.effect);
+        break;
+      }
+      case 'moduleBypass': if (isModIndex(m.module)) this.mods[m.module].bypassed = !!m.on; break;
+      case 'order': if (isOrder(m.order)) this.order = m.order.slice(); break;
       case 'bypass': this.bypass = !!m.on; break;
-      case 'inputGain': this.inGain = m.value; break;
-      case 'captureRoute': this.capPre = m.pre; break;
+      case 'inputGain': if (typeof m.value === 'number' && m.value > 0 && m.value <= 16) this.inGain = m.value; break;
+      case 'captureRoute': this.capPre = !!m.pre; break;
       case 'capture':
         if (m.action === 'rec') this.cap.rec();
         else if (m.action === 'play') this.cap.play();
@@ -1012,7 +1063,7 @@ class ChromaProcessor extends AudioWorkletProcessor {
     const outG = volGain(S.output);
     const byT = this.bypass ? 0 : 1, byStep = 1 / (0.02 * SR);
     const ol = out[0], or = out[1] || out[0];
-    let pkOut = this.pkOut;
+    let pkOut = this.pkOut, broken = false;
     for (let i = 0; i < n; i++) {
       this.byG += clamp(byT - this.byG, -byStep, byStep);
       let yl = (dL[i] * g * dryG + L[i] * wetG) * outG;
@@ -1023,12 +1074,13 @@ class ChromaProcessor extends AudioWorkletProcessor {
       const al = Math.abs(yl), ar = Math.abs(yr);
       if (al > 0.7) yl = Math.sign(yl) * (0.7 + 0.29 * softclip((al - 0.7) / 0.29));
       if (ar > 0.7) yr = Math.sign(yr) * (0.7 + 0.29 * softclip((ar - 0.7) / 0.29));
-      if (!(yl === yl)) yl = 0; // NaN guard
-      if (!(yr === yr)) yr = 0;
+      if (!(yl === yl)) { yl = 0; broken = true; } // NaN guard
+      if (!(yr === yr)) { yr = 0; broken = true; }
       ol[i] = yl; if (or !== ol) or[i] = yr;
       const a = Math.max(al, ar); if (a > pkOut) pkOut = a;
     }
-    this.pkOut = pkOut;
+    this.pkOut = broken ? 0 : pkOut;
+    if (broken) this.recover();
 
     if (++this.meterCnt >= 12) {
       this.meterCnt = 0;
@@ -1040,6 +1092,22 @@ class ChromaProcessor extends AudioWorkletProcessor {
       this.pkIn = 0; this.pkOut = 0;
     }
     return true;
+  }
+
+  // A NaN that got into a filter or feedback loop stays there forever. Instead
+  // of muting the output until the page is reloaded, rebuild the DSP state.
+  // Allocating here is acceptable because it only happens after a fault.
+  recover() {
+    const old = this.mods;
+    this.mods = makeModules();
+    old.forEach((m, k) => {
+      const nm = this.mods[k];
+      nm.sel = m.pending >= 0 ? m.pending : m.sel;
+      nm.bypassed = m.bypassed;
+      nm.byG = m.bypassed ? 0 : 1;
+    });
+    Object.assign(this.S, this.P);
+    this.cap.clear();
   }
 }
 

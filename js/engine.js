@@ -1,5 +1,8 @@
 // Audio plumbing: AudioContext, the DSP worklet, input sources and output recording.
 
+// the lowest slider position (-48 dB and below) means silence
+const dbToGain = (db) => (db <= -48 ? 0 : Math.pow(10, db / 20));
+
 export class Engine {
   constructor() {
     this.ctx = null;
@@ -9,24 +12,48 @@ export class Engine {
     this.onMeter = null;
     this.buffers = {};
     this.recorder = null;
+    this.inputNodes = [];
+    this.inChannels = 0;
+    this.inGainDb = 0;   // trim in front of the pedal
+    this.outGainDb = 0;  // listening volume, speakers only
   }
 
   async init() {
     const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) throw new Error('Dieser Browser unterstützt kein Web Audio');
     const ctx = new AC({ latencyHint: 'interactive' });
+    // resume while we are still inside the click handler; after the first
+    // await some browsers no longer count it as a user gesture
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    try {
+      if (!ctx.audioWorklet) {
+        throw new Error(window.isSecureContext === false
+          ? 'AudioWorklet gibt es nur über https:// oder localhost'
+          : 'Dieser Browser unterstützt kein AudioWorklet (Chrome, Edge, Firefox oder Safari ab 14.1 nehmen)');
+      }
+      // a bundled single-file build passes the worklet in as a blob: URL
+      const url = window.__CHROMA_WORKLET_URL || new URL('../worklet/chroma-processor.js', import.meta.url);
+      await ctx.audioWorklet.addModule(url);
+      this.node = new AudioWorkletNode(ctx, 'chroma-console', {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+        channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers',
+      });
+    } catch (err) {
+      // do not leak one AudioContext per failed attempt
+      ctx.close().catch(() => {});
+      throw err;
+    }
     this.ctx = ctx;
-    // a bundled single-file build passes the worklet in as a blob: URL
-    const url = window.__CHROMA_WORKLET_URL || new URL('../worklet/chroma-processor.js', import.meta.url);
-    await ctx.audioWorklet.addModule(url);
-    this.node = new AudioWorkletNode(ctx, 'chroma-console', {
-      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
-      channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers',
-    });
     this.inBus = ctx.createGain();
+    this.inBus.gain.value = dbToGain(this.inGainDb);
     this.inBus.connect(this.node);
     this.out = ctx.createGain();
     this.node.connect(this.out);
-    this.out.connect(ctx.destination);
+    // volume sits only on the way to the speakers: recording and scope keep the pedal level
+    this.vol = ctx.createGain();
+    this.vol.gain.value = dbToGain(this.outGainDb);
+    this.out.connect(this.vol);
+    this.vol.connect(ctx.destination);
     this.analyser = ctx.createAnalyser();
     this.analyser.fftSize = 2048;
     this.analyser.smoothingTimeConstant = 0.75;
@@ -34,7 +61,23 @@ export class Engine {
     this.recDest = ctx.createMediaStreamDestination();
     this.out.connect(this.recDest);
     this.node.port.onmessage = (e) => { if (e.data.type === 'meter' && this.onMeter) this.onMeter(e.data); };
-    if (ctx.state === 'suspended') await ctx.resume();
+  }
+
+  // Mobile browsers suspend or "interrupt" the context (calls, app switch).
+  // Called on every user interaction so the pedal comes back by itself.
+  wake() {
+    const ctx = this.ctx;
+    if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') ctx.resume().catch(() => {});
+  }
+
+  setInputGain(db) {
+    this.inGainDb = db;
+    if (this.inBus) this.inBus.gain.setTargetAtTime(dbToGain(db), this.ctx.currentTime, 0.02);
+  }
+
+  setOutputGain(db) {
+    this.outGainDb = db;
+    if (this.vol) this.vol.gain.setTargetAtTime(dbToGain(db), this.ctx.currentTime, 0.02);
   }
 
   send(msg) { if (this.node) this.node.port.postMessage(msg); }
@@ -45,6 +88,8 @@ export class Engine {
       this.src.disconnect();
       this.src = null;
     }
+    this.inputNodes.forEach((n) => n.disconnect());
+    this.inputNodes = [];
     if (this.mic) { this.mic.getTracks().forEach((t) => t.stop()); this.mic = null; }
   }
 
@@ -70,18 +115,83 @@ export class Engine {
     this.playBuffer(buf);
   }
 
-  async useMic() {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
+  // Live input from any audio input the browser sees: audio interface,
+  // USB devices such as an Elektron box, built-in mic. deviceId '' = default.
+  async useInput(deviceId, channels) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error(window.isSecureContext === false ? 'Live-Eingang gibt es nur über https:// oder localhost' : 'Dieser Browser erlaubt keinen Audio-Eingang');
+    }
+    // no voice processing, ask for a stereo pair (browsers capture mono otherwise)
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 }, latency: { ideal: 0 } };
+    if (deviceId) audio.deviceId = { exact: deviceId };
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio });
+    } catch (err) {
+      // a remembered device that is unplugged now: fall back to the default one
+      if (!deviceId || (err.name !== 'OverconstrainedError' && err.name !== 'NotFoundError')) throw err;
+      delete audio.deviceId;
+      stream = await navigator.mediaDevices.getUserMedia({ audio });
+    }
+    let src;
+    try {
+      src = this.ctx.createMediaStreamSource(stream);
+    } catch (err) {
+      stream.getTracks().forEach((t) => t.stop());
+      throw err;
+    }
     this.stopSource();
-    const s = this.ctx.createMediaStreamSource(stream);
-    s.connect(this.inBus);
-    this.src = s;
+    this.src = src;
     this.mic = stream;
+    const track = stream.getAudioTracks()[0];
+    const s = track && track.getSettings ? track.getSettings() : {};
+    this.inChannels = s.channelCount || 0;
+    this.routeInput(channels);
+    return { deviceId: s.deviceId || '', label: (track && track.label) || '', channels: this.inChannels, fallback: !!deviceId && s.deviceId !== deviceId };
+  }
+
+  // Which input channels feed the pedal: 'stereo' (1+2), 'left' (1), 'right' (2), 'sum' (1+2 mono)
+  routeInput(mode) {
+    if (!this.mic || !this.src) return;
+    this.inputNodes.forEach((n) => n.disconnect());
+    this.inputNodes = [];
+    this.src.disconnect();
+    if (mode === 'right' && this.inChannels === 1) mode = 'left'; // mono device: there is no channel 2
+    if (mode === 'left' || mode === 'right') {
+      const sp = this.ctx.createChannelSplitter(2);
+      this.src.connect(sp);
+      sp.connect(this.inBus, mode === 'left' ? 0 : 1); // mono into the worklet is spread to both sides
+      this.inputNodes.push(sp);
+    } else if (mode === 'sum') {
+      const g = this.ctx.createGain();
+      g.channelCount = 1; g.channelCountMode = 'explicit'; g.channelInterpretation = 'speakers';
+      this.src.connect(g);
+      g.connect(this.inBus);
+      this.inputNodes.push(g);
+    } else {
+      this.src.connect(this.inBus);
+    }
+  }
+
+  get canChooseOutput() { return typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype; }
+
+  // Output device (Chrome/Edge 110+). '' = system default.
+  async setOutput(deviceId) {
+    if (!this.ctx || !this.canChooseOutput) return;
+    await this.ctx.setSinkId(deviceId || '');
+  }
+
+  // Rough round-trip estimate in ms, or null if the browser does not say
+  latencyMs() {
+    const ctx = this.ctx;
+    if (!ctx || typeof ctx.baseLatency !== 'number') return null;
+    const track = this.mic && this.mic.getAudioTracks()[0];
+    const inLat = track && track.getSettings && typeof track.getSettings().latency === 'number' ? track.getSettings().latency : 0;
+    return Math.round((ctx.baseLatency + (ctx.outputLatency || 0) + inLat + 128 / ctx.sampleRate) * 1000);
   }
 
   startRecording() {
+    if (!window.MediaRecorder || !this.recDest) throw new Error('Dieser Browser kann keine Audio-Aufnahmen erstellen');
     const chunks = [];
     const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg', 'audio/mp4'];
     const mimeType = types.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t));

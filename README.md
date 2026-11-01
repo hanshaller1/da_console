@@ -30,7 +30,13 @@ Oder per GitHub Pages: *Settings → Pages → Deploy from a branch → `main` /
 | Kalibrierung (4 Eingangsstufen, Auto) | ✓ |
 | Bypass-Fußschalter, halten = Presets | ✓ (`B`) |
 
-Extras: eingebaute Demo-Loops (Karplus-Strong-Gitarre, synthetische Drums), Mikrofon/Line-In, eigene Audiodateien, Aufnahme des Ausgangs als Download, Spektrum/Oszilloskop und eine Pedal-Grafik, die auf die gewählten Effekte und den Pegel reagiert.
+Extras: eingebaute Demo-Loops (Karplus-Strong-Gitarre, synthetische Drums), Live-Eingang von jedem Audiogerät, eigene Audiodateien, Aufnahme des Ausgangs als Download, Spektrum/Oszilloskop und eine Pedal-Grafik, die auf die gewählten Effekte und den Pegel reagiert.
+
+### Live-Eingang
+
+„Audio-Eingang“ nimmt jedes Gerät, das der Browser sieht: Audio-Interface, USB-Geräte wie Elektron Syntakt/Digitakt, eingebautes Mikrofon. Nach der Freigabe lassen sich Gerät und Kanäle wählen (1+2 stereo, 1 oder 2 mono, Mono-Summe). Echo-Unterdrückung, Rauschfilter und automatische Pegelanpassung des Browsers sind abgeschaltet. In Chrome und Edge kann außerdem das Ausgabegerät gewählt werden, z. B. direkt das Interface. Die Auswahl merkt sich der Browser.
+
+Browser geben über `getUserMedia` in der Regel nur ein Stereopaar weiter; bei Interfaces mit mehr Eingängen sind das die ersten beiden. Live-Eingänge brauchen `https://` oder `localhost` und funktionieren nicht in der claude.ai-Artifact-Version.
 
 ### Effekte
 

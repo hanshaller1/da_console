@@ -2,7 +2,7 @@ import { MODULES, KNOBS, DEFAULTS, PARAM_MODULE, CALIBRATION, describe, invExp }
 import { Engine } from './engine.js';
 import { Knob } from './knob.js';
 import { Gesture } from './gesture.js';
-import { loadAll, saveAll, resetFactory, slotName, SLOTS } from './presets.js';
+import { loadAll, saveAll, resetFactory, slotName, SLOTS, sanitizePreset } from './presets.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -31,6 +31,7 @@ const state = {
   cap: { state: 'idle', len: 0, pos: 0, short: false },
   taps: [],
   bpm: null,
+  beatT0: 0,
   level: 0,
 };
 let presets = loadAll();
@@ -77,10 +78,16 @@ function buildPedal() {
       lab.innerHTML = `<span class="p">${def.label}</span><span class="s">${def.sub}</span>`;
       slot.appendChild(lab);
       col.appendChild(slot);
+      // Remember which parameter was grabbed: if SHIFT flips while the knob is
+      // held, releasing must free the same parameter for Gesture playback.
+      let grabbed = null;
       const knob = new Knob(el, {
-        onInput: (v) => setParam(activeParam(def), v, true),
-        onGrab: () => { gesture.held.add(activeParam(def)); showParam(activeParam(def)); },
-        onRelease: () => gesture.held.delete(activeParam(def)),
+        onInput: (v) => setParam(grabbed || activeParam(def), v, true),
+        onGrab: () => {
+          if (!grabbed) { grabbed = activeParam(def); gesture.held.add(grabbed); }
+          showParam(grabbed);
+        },
+        onRelease: () => { if (grabbed) gesture.held.delete(grabbed); grabbed = null; },
         onReset: () => { const p = activeParam(def); knob.set(DEFAULTS[p]); setParam(p, DEFAULTS[p], true); },
       });
       knob.def = def;
@@ -184,14 +191,14 @@ function renderPresets() {
   let html = '';
   for (let i = start; i < start + 40; i++) {
     const p = presets[i];
-    html += `<button class="pslot${p ? ' filled' : ''}${i === state.slot ? ' sel' : ''}" data-slot="${i}" title="${p ? p.name : 'leer'}">
+    html += `<button class="pslot${p ? ' filled' : ''}${i === state.slot ? ' sel' : ''}" data-slot="${i}" title="${p ? escapeHtml(p.name) : 'leer'}">
       <span>${slotName(i)}</span><em>${p ? escapeHtml(p.name) : '·'}</em></button>`;
   }
   grid.innerHTML = html;
   const cur = presets[state.slot];
   if (document.activeElement !== $('#presetName')) $('#presetName').value = cur ? cur.name : '';
 }
-const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ------------------------------------------------------------------ */
 /* Module buttons (with pedal-style combos)                            */
@@ -209,6 +216,7 @@ function modDown(m) {
     clearTimeout(o.timer);
     o.combo = true;
     held.set(m, { combo: true });
+    $(`.modbtn[data-m="${m}"]`).classList.add('down');
     if (COMBOS[key]) combo(COMBOS[key]);
     return;
   }
@@ -225,6 +233,16 @@ function modUp(m) {
   held.delete(m);
   clearTimeout(e.timer);
   if (!e.combo && !e.long) modPress(m);
+}
+
+// A key or button let go while the window had no focus never sends keyup.
+// Without this the module stays "held" and swallows the next presses.
+function releaseHeld() {
+  for (const [m, e] of held) {
+    clearTimeout(e.timer);
+    $(`.modbtn[data-m="${m}"]`).classList.remove('down');
+  }
+  held.clear();
 }
 
 function modPress(m) {
@@ -309,6 +327,7 @@ function openPresets() {
 let capHolding = false;
 function tapDown() {
   capHolding = false;
+  if (!state.on) return;
   clearTimeout(tapDown.t);
   tapDown.t = setTimeout(() => {
     capHolding = true;
@@ -318,6 +337,7 @@ function tapDown() {
 }
 function tapUp() {
   clearTimeout(tapDown.t);
+  if (!state.on) return;
   if (capHolding) {
     capHolding = false;
     engine.send({ type: 'capture', action: 'play' });
@@ -340,6 +360,7 @@ function tapTempo() {
   const d = state.taps.slice(1).map((x, i) => x - state.taps[i]);
   const beat = d.reduce((a, b) => a + b, 0) / d.length;
   state.bpm = 60 / beat;
+  state.beatT0 = t; // the LED blinks in phase with the taps
   // Movement: one cycle per beat (not for Pitch, where RATE is the mix)
   if (MODULES[1].effects[state.effects[1]].name !== 'Pitch') {
     const target = MODULES[1].effects[state.effects[1]].name === 'Doubler' ? 1 / beat / 0.18 : 1 / beat;
@@ -374,7 +395,7 @@ function snapshot(name) {
 }
 
 function loadPreset(i) {
-  const p = presets[i];
+  const p = sanitizePreset(presets[i]);
   state.slot = i;
   if (!p) { render(); info(`${slotName(i)} ist leer`, 'Mit „Speichern“ (B+C) hier ablegen'); return; }
   state.params = { ...DEFAULTS, ...p.params };
@@ -469,6 +490,9 @@ function drawScope() {
 
 let last = performance.now();
 function frame(t) {
+  // schedule first: one exception in a frame must not stop the animation
+  // and Gesture playback for good
+  requestAnimationFrame(frame);
   const dt = Math.min(0.1, (t - last) / 1000);
   last = t;
   // gesture playback
@@ -488,9 +512,8 @@ function frame(t) {
   else if (cs === 'play') tapLed.classList.add(state.cap.short ? 'loop-short' : 'loop-long');
   else if (state.bpm && state.on) {
     const beat = 60 / state.bpm;
-    if ((now() % beat) / beat < 0.18) tapLed.classList.add('beat');
+    if (((now() - state.beatT0) % beat) / beat < 0.18) tapLed.classList.add('beat');
   }
-  requestAnimationFrame(frame);
 }
 
 /* ------------------------------------------------------------------ */
@@ -517,10 +540,11 @@ function renderCapture() {
 }
 
 function autoCalibrate() {
-  calibrating = { peak: 0 };
+  if (calibrating) return; // a second click used to crash the running measurement
+  const run = calibrating = { peak: 0 };
   info('KALIBRIERUNG', 'Spiel ein paar Akkorde in normaler Lautstärke … (4 s)', true);
   setTimeout(() => {
-    const raw = calibrating.peak;
+    const raw = run.peak;
     calibrating = null;
     if (raw < 0.002) { info('KALIBRIERUNG', 'Kein Signal erkannt'); return; }
     let best = 0, bestErr = Infinity;
@@ -543,14 +567,105 @@ async function setSource(src) {
   if (!state.on) return;
   try {
     if (src === 'guitar' || src === 'drums') engine.useDemo(src);
-    else if (src === 'mic') { await engine.useMic(); info('MIKRO / LINE-IN aktiv', 'Kopfhörer benutzen! Danach am besten „Auto“-Kalibrierung.'); }
+    else if (src === 'mic') await startLiveInput();
     else if (src === 'file') { $('#fileInput').click(); return; }
     else engine.stopSource();
     state.source = src;
     render();
   } catch (err) {
-    info('Eingang nicht verfügbar', err.message || String(err));
+    info('Eingang nicht verfügbar', inputError(err));
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Live input / output devices                                         */
+/* ------------------------------------------------------------------ */
+
+// remembered per browser: which interface, which channels, which output
+const IO_KEY = 'chroma-console-web.io.v1';
+const io = (() => {
+  const d = { inDevice: '', inChannels: 'stereo', outDevice: '', inGainDb: 0, outGainDb: 0 };
+  try { return Object.assign(d, JSON.parse(localStorage.getItem(IO_KEY) || '{}')); } catch { return d; }
+})();
+const saveIO = () => { try { localStorage.setItem(IO_KEY, JSON.stringify(io)); } catch { /* storage unavailable */ } };
+
+function inputError(err) {
+  const name = err && err.name;
+  if (name === 'NotAllowedError') return 'Zugriff verweigert. Im Browser beim Schloss-Symbol neben der Adresse „Mikrofon“ erlauben.';
+  if (name === 'NotFoundError') return 'Kein Audio-Eingang gefunden. Ist das Interface angeschlossen?';
+  if (name === 'NotReadableError') return 'Das Gerät ist belegt (andere App?) oder liefert kein Signal.';
+  if (name === 'NotSupportedError') return `${err.message} – in Chrome oder Edge klappt es meist.`;
+  return (err && err.message) || String(err);
+}
+
+async function startLiveInput() {
+  const r = await engine.useInput(io.inDevice, io.inChannels);
+  if (r.fallback) { io.inDevice = ''; saveIO(); }
+  await refreshDevices();
+  const ch = r.channels === 1 ? 'mono' : r.channels ? `${r.channels} Kanäle` : '';
+  const lat = engine.latencyMs();
+  info('AUDIO-EINGANG aktiv', [r.fallback ? 'Gewähltes Gerät fehlt, nehme Standard' : r.label || 'Standardgerät', ch, lat ? `ca. ${lat} ms Latenz` : ''].filter(Boolean).join(' · '));
+}
+
+async function refreshDevices() {
+  const md = navigator.mediaDevices;
+  if (!md || !md.enumerateDevices) return;
+  let list = [];
+  try { list = await md.enumerateDevices(); } catch { return; }
+  const fill = (sel, kind, current, word) => {
+    // 'default'/'communications' are Chrome's aliases; "Standardgerät" covers them
+    const devs = list.filter((d) => d.kind === kind && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications');
+    sel.innerHTML = '<option value="">Standardgerät</option>' + devs.map((d, i) => `<option value="${escapeHtml(d.deviceId)}">${escapeHtml(d.label || `${word} ${i + 1}`)}</option>`).join('');
+    sel.value = devs.some((d) => d.deviceId === current) ? current : '';
+  };
+  fill($('#inDevice'), 'audioinput', io.inDevice, 'Eingang');
+  if (engine.canChooseOutput) fill($('#outDevice'), 'audiooutput', io.outDevice, 'Ausgang');
+}
+
+// Input trim and listening volume: two sliders, remembered per browser,
+// usable before power-on (the engine applies them when it starts)
+function wireLevels() {
+  const fmt = (db, min) => (db <= min ? 'aus' : `${db > 0 ? '+' : db < 0 ? '−' : ''}${Math.abs(db).toFixed(1)} dB`);
+  const setup = (id, key, min, max, apply, label) => {
+    const el = $(`#${id}`), out = $(`#${id}Val`);
+    const clampDb = (v) => (Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : 0);
+    const set = (db, announce) => {
+      db = clampDb(db);
+      el.value = String(db);
+      out.textContent = fmt(db, id === 'outLevel' ? min : -Infinity);
+      io[key] = db; saveIO();
+      apply(db);
+      if (announce) info(label, out.textContent);
+    };
+    el.addEventListener('input', () => set(+el.value, true));
+    el.addEventListener('dblclick', () => set(0, true));
+    set(+io[key], false);
+  };
+  setup('inLevel', 'inGainDb', -24, 24, (db) => engine.setInputGain(db), 'EINGANGSPEGEL');
+  setup('outLevel', 'outGainDb', -48, 0, (db) => engine.setOutputGain(db), 'LAUTSTÄRKE');
+}
+
+function wireIO() {
+  const md = navigator.mediaDevices;
+  if (!md || window.__CHROMA_ARTIFACT) { $('#ioPanel').hidden = true; return; }
+  $('#inChannels').value = io.inChannels;
+  $$('.out-only').forEach((el) => { el.hidden = !engine.canChooseOutput; });
+  $('#inDevice').addEventListener('change', (e) => {
+    io.inDevice = e.target.value; saveIO();
+    setSource('mic'); // picking a device means: use it now
+  });
+  $('#inChannels').addEventListener('change', (e) => {
+    io.inChannels = e.target.value; saveIO();
+    engine.routeInput(io.inChannels);
+    if (state.source === 'mic' && engine.inChannels === 1 && io.inChannels !== 'left') info('Gerät liefert nur einen Kanal', 'Der Browser bekommt von diesem Eingang nur Mono.');
+  });
+  $('#outDevice').addEventListener('change', async (e) => {
+    io.outDevice = e.target.value; saveIO();
+    try { await engine.setOutput(io.outDevice); info('Ausgang', e.target.selectedOptions[0].textContent); }
+    catch (err) { info('Ausgang nicht wählbar', inputError(err)); }
+  });
+  if (md.addEventListener) md.addEventListener('devicechange', refreshDevices);
+  refreshDevices();
 }
 
 async function powerOn() {
@@ -562,6 +677,7 @@ async function powerOn() {
     state.on = true;
     $('#power').classList.add('hidden');
     sendAll();
+    if (io.outDevice) engine.setOutput(io.outDevice).catch(() => {}); // needs input permission in some browsers
     engine.useDemo('guitar');
     state.source = 'guitar';
     loadPreset(state.slot);
@@ -569,7 +685,8 @@ async function powerOn() {
   } catch (err) {
     btn.disabled = false;
     btn.textContent = '⏻ Einschalten';
-    info('Audio-Start fehlgeschlagen', `${err.message || err}. Die App muss über http(s) laufen, nicht als file://.`, true);
+    const hint = location.protocol === 'file:' ? ' Die App muss über http(s) laufen, nicht als file://.' : '';
+    info('Audio-Start fehlgeschlagen', `${err.message || err}.${hint}`, true);
   }
 }
 
@@ -590,25 +707,30 @@ function wire() {
 
   $$('.combo').forEach((b) => {
     if (b.dataset.combo === 'gesture') {
-      let t = null, long = false;
-      b.addEventListener('pointerdown', () => { long = false; t = setTimeout(() => { long = true; clearGesture(); }, 700); });
-      b.addEventListener('pointerup', () => { clearTimeout(t); if (!long) combo('gesture'); });
-      b.addEventListener('pointerleave', () => clearTimeout(t));
+      // tap = start/stop, hold = clear. Only a release that follows a press on
+      // this button counts (dragging onto it and letting go used to toggle).
+      let t = null, long = false, down = false;
+      b.addEventListener('pointerdown', (e) => { if (e.button !== 0) return; down = true; long = false; t = setTimeout(() => { long = true; clearGesture(); }, 700); });
+      b.addEventListener('pointerup', () => { clearTimeout(t); if (down && !long) combo('gesture'); down = false; });
+      b.addEventListener('pointerleave', () => { clearTimeout(t); down = false; });
+      b.addEventListener('click', (e) => { if (e.detail === 0) combo('gesture'); }); // Enter key
     } else b.addEventListener('click', () => combo(b.dataset.combo));
   });
 
   const fsB = $('#fsBypass');
-  let bT = null, bLong = false;
-  fsB.addEventListener('pointerdown', (e) => { e.preventDefault(); bLong = false; fsB.classList.add('down'); bT = setTimeout(() => { bLong = true; openPresets(); }, 600); });
-  fsB.addEventListener('pointerup', () => { fsB.classList.remove('down'); clearTimeout(bT); if (!bLong) bypassPress(); });
-  fsB.addEventListener('pointerleave', () => { fsB.classList.remove('down'); clearTimeout(bT); });
+  let bT = null, bLong = false, bDown = false;
+  fsB.addEventListener('pointerdown', (e) => { e.preventDefault(); if (e.button !== 0) return; bDown = true; bLong = false; fsB.classList.add('down'); bT = setTimeout(() => { bLong = true; openPresets(); }, 600); });
+  fsB.addEventListener('pointerup', () => { fsB.classList.remove('down'); clearTimeout(bT); if (bDown && !bLong) bypassPress(); bDown = false; });
+  fsB.addEventListener('pointerleave', () => { fsB.classList.remove('down'); clearTimeout(bT); bDown = false; });
+  fsB.addEventListener('contextmenu', (e) => e.preventDefault());
 
   const fsT = $('#fsTap');
   let tDown = false;
-  fsT.addEventListener('pointerdown', (e) => { e.preventDefault(); fsT.setPointerCapture(e.pointerId); tDown = true; fsT.classList.add('down'); tapDown(); });
+  fsT.addEventListener('pointerdown', (e) => { e.preventDefault(); if (e.button !== 0 || tDown) return; fsT.setPointerCapture(e.pointerId); tDown = true; fsT.classList.add('down'); tapDown(); });
   const tEnd = () => { if (!tDown) return; tDown = false; fsT.classList.remove('down'); tapUp(); };
   fsT.addEventListener('pointerup', tEnd);
   fsT.addEventListener('pointercancel', tEnd);
+  fsT.addEventListener('contextmenu', (e) => e.preventDefault());
 
   $$('#sources button').forEach((b) => b.addEventListener('click', () => setSource(b.dataset.src)));
   $('#fileInput').addEventListener('change', async (e) => {
@@ -666,7 +788,7 @@ function wire() {
       const data = JSON.parse(await f.text());
       const list = Array.isArray(data) ? data : data.presets;
       if (!Array.isArray(list)) throw new Error('Unbekanntes Format');
-      presets = new Array(SLOTS).fill(null).map((_, i) => list[i] || null);
+      presets = new Array(SLOTS).fill(null).map((_, i) => sanitizePreset(list[i]));
       saveAll(presets); renderPresets();
       info('Presets importiert', `${presets.filter(Boolean).length} Slots belegt`);
     } catch (err) { info('Import fehlgeschlagen', err.message); }
@@ -677,7 +799,7 @@ function wire() {
     if (!state.on) return;
     const btn = $('#recBtn');
     if (!engine.recorder) {
-      engine.startRecording();
+      try { engine.startRecording(); } catch (err) { info('Aufnahme nicht möglich', err.message || String(err)); return; }
       btn.textContent = '■ Aufnahme stoppen';
       btn.classList.add('rec');
       $('#recLink').hidden = true;
@@ -697,19 +819,32 @@ function wire() {
 
   // keyboard: 1-4 = module buttons (hold two for combos), space = TAP, b = BYPASS
   const keyMod = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, Numpad1: 0, Numpad2: 1, Numpad3: 2, Numpad4: 3 };
+  const typing = (e) => e.target && e.target.closest && e.target.closest('input, textarea, select, [contenteditable]');
+  // Space only counts as TAP if its keydown started one: typing a space in
+  // the preset name used to fire TAP on keyup (tap tempo / stop the loop)
+  let spaceTap = false;
+  const spaceEnd = () => { if (!spaceTap) return; spaceTap = false; fsT.classList.remove('down'); tapUp(); };
   window.addEventListener('keydown', (e) => {
-    if (e.target.closest && e.target.closest('input, textarea')) return;
+    if (typing(e) || e.ctrlKey || e.metaKey || e.altKey) return; // leave Ctrl+S, Cmd+B … to the browser
     if (e.repeat) { if (e.code === 'Space') e.preventDefault(); return; }
     if (e.code in keyMod) { modDown(keyMod[e.code]); e.preventDefault(); }
-    else if (e.code === 'Space') { e.preventDefault(); if (!state.on) return; $('#fsTap').classList.add('down'); tapDown(); }
+    else if (e.code === 'Space') { e.preventDefault(); if (!state.on) return; spaceTap = true; fsT.classList.add('down'); tapDown(); }
     else if (e.code === 'KeyB') bypassPress();
     else if (e.code === 'KeyG') combo('gesture');
     else if (e.code === 'KeyS') combo('shift');
   });
   window.addEventListener('keyup', (e) => {
     if (e.code in keyMod) modUp(keyMod[e.code]);
-    else if (e.code === 'Space' && state.on) { $('#fsTap').classList.remove('down'); tapUp(); }
+    else if (e.code === 'Space' && spaceTap) { e.preventDefault(); spaceEnd(); }
   });
+  // switching tabs/windows while a key or footswitch is held: let go of everything
+  window.addEventListener('blur', () => { releaseHeld(); spaceEnd(); tEnd(); });
+
+  // bring a suspended or interrupted AudioContext back on the next interaction
+  const wake = () => engine.wake();
+  window.addEventListener('pointerdown', wake, true);
+  window.addEventListener('keydown', wake, true);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) wake(); });
 }
 
 let lastRec = null;
@@ -756,8 +891,10 @@ if (window.__CHROMA_ARTIFACT) {
   // claude.ai artifacts have no microphone access; files and demos still work
   const mic = $('#sources [data-src="mic"]');
   if (mic) mic.hidden = true;
-  $('#srcHint').textContent = 'In dieser Online-Version gibt es keinen Mikrofon-Eingang. Lade stattdessen eine eigene Audiodatei (z. B. eine DI-Gitarrenspur).';
+  $('#srcHint').textContent = 'In dieser Online-Version gibt es keine Live-Eingänge (Audio-Interface, Mikrofon, USB-Geräte). Lade stattdessen eine Audiodatei, z. B. eine DI-Spur. Live spielen geht mit der Version auf GitHub Pages oder lokal.';
 }
+wireIO();
+wireLevels();
 // show the first preset's settings on the (still silent) pedal
 (() => {
   const p = presets[0];
