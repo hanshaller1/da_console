@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chroma Console Web</title>
+  <meta name="description" content="Browser-Nachbau eines Vier-Modul-Multieffekts: Character, Movement, Diffusion, Texture – mit Gesture, Capture und 80 Presets.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="logo"><span class="logo-dot"></span>chroma console <em>web</em></div>
+    <p class="tag">Inoffizieller Browser-Nachbau des Hologram&nbsp;Chroma&nbsp;Console: vier Module, 20 Effekte, Gesture, Capture und 80&nbsp;Presets.</p>
+  </header>
+
+  <main class="layout">
+    <section class="stage">
+      <div class="info" id="info" aria-live="polite">
+        <span class="info-main" id="infoMain">Strom aus</span>
+        <span class="info-sub" id="infoSub">Klick auf „Einschalten“, um die Audio-Engine zu starten.</span>
+      </div>
+
+      <div class="pedal" id="pedal">
+        <canvas id="art" class="art" aria-hidden="true"></canvas>
+        <div class="pedal-inner">
+          <div class="pedal-head">
+            <span class="wordmark">chroma console</span>
+            <span class="modes">
+              <span class="mode" id="modeShift">SHIFT</span>
+              <span class="mode" id="modeGesture">GESTURE</span>
+              <span class="mode" id="modeSetup">FX SETUP</span>
+            </span>
+          </div>
+          <div class="columns" id="columns"></div>
+          <div class="order" id="order" title="Signalfluss (FX SETUP: A+D)"></div>
+          <div class="feet">
+            <div class="foot-wrap">
+              <span class="foot-led" id="ledBypass"></span>
+              <button class="foot" id="fsBypass" aria-label="Bypass-Fußschalter"></button>
+              <span class="foot-label">BYPASS<small>halten: PRESETS</small></span>
+            </div>
+            <div class="meters">
+              <div class="meter"><span>IN</span><i id="meterIn"></i></div>
+              <div class="meter"><span>OUT</span><i id="meterOut"></i></div>
+            </div>
+            <div class="foot-wrap">
+              <span class="foot-led" id="ledTap"></span>
+              <button class="foot" id="fsTap" aria-label="Tap/Capture-Fußschalter"></button>
+              <span class="foot-label">TAP<small>halten: CAPTURE</small></span>
+            </div>
+          </div>
+        </div>
+        <div class="power" id="power">
+          <button id="powerBtn" class="power-btn">⏻ Einschalten</button>
+          <p>Startet die Audio-Engine mit einem eingebauten Gitarren-Loop. Danach kannst du auf Mikrofon/Line-In oder eine eigene Datei umschalten.</p>
+        </div>
+      </div>
+
+      <div class="combos">
+        <button class="combo" data-combo="shift"><b>A+B</b> Shift</button>
+        <button class="combo" data-combo="gesture"><b>C+D</b> Gesture</button>
+        <button class="combo" data-combo="setup"><b>A+D</b> FX Setup</button>
+        <button class="combo" data-combo="save"><b>B+C</b> Speichern</button>
+      </div>
+    </section>
+
+    <aside class="console">
+      <section class="panel">
+        <h2>Eingang</h2>
+        <div class="seg" id="sources">
+          <button data-src="guitar">Demo: Gitarre</button>
+          <button data-src="drums">Demo: Drums</button>
+          <button data-src="mic">Audio-Eingang</button>
+          <button data-src="file">Datei…</button>
+          <button data-src="none">Stumm</button>
+        </div>
+        <input type="file" id="fileInput" accept="audio/*" hidden>
+        <div class="level" title="Doppelklick: 0 dB">
+          <label for="inLevel">Eingangspegel</label>
+          <input type="range" id="inLevel" min="-24" max="24" step="0.5" value="0">
+          <output id="inLevelVal" for="inLevel">0.0 dB</output>
+        </div>
+        <div class="io" id="ioPanel">
+          <label for="inDevice">Gerät</label>
+          <select id="inDevice"><option value="">Standardgerät</option></select>
+          <label for="inChannels">Kanäle</label>
+          <select id="inChannels">
+            <option value="stereo">1+2 stereo</option>
+            <option value="left">1 (links) mono</option>
+            <option value="right">2 (rechts) mono</option>
+            <option value="sum">1+2 als Mono-Summe</option>
+          </select>
+          <label for="outDevice" class="out-only">Ausgang</label>
+          <select id="outDevice" class="out-only"><option value="">Standardgerät</option></select>
+        </div>
+        <p class="hint" id="srcHint">Audio-Interface, Mikrofon oder USB-Geräte wie ein Syntakt: „Audio-Eingang“ drücken, Zugriff erlauben, dann Gerät und Kanäle wählen. Kopfhörer benutzen, sonst koppelt ein Mikrofon zurück.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Kalibrierung</h2>
+        <div class="seg" id="calib"></div>
+        <p class="hint" id="calibHint"></p>
+      </section>
+
+      <section class="panel">
+        <h2>Capture</h2>
+        <p class="cap-state" id="capState">Leer. TAP gedrückt halten (oder Leertaste), um aufzunehmen.</p>
+        <div class="seg" id="capRoute">
+          <button data-route="pre">Pre-FX</button>
+          <button data-route="post">Post-FX</button>
+        </div>
+        <p class="hint">Pre-FX: der Loop läuft durch die Effekte, du kannst ihn live weiterformen. Post-FX: der Loop wird mitsamt Effekten eingefroren.</p>
+      </section>
+
+      <section class="panel" id="presetPanel">
+        <h2>Presets</h2>
+        <div class="seg small" id="banks">
+          <button data-bank="0">Bank A</button>
+          <button data-bank="1">Bank B</button>
+        </div>
+        <div class="presets" id="presetGrid"></div>
+        <div class="preset-row">
+          <input id="presetName" type="text" maxlength="24" placeholder="Name">
+          <button id="presetSave">Speichern</button>
+        </div>
+        <div class="preset-row small">
+          <button id="presetExport">Export</button>
+          <button id="presetImport">Import</button>
+          <button id="presetDelete">Slot leeren</button>
+          <button id="presetFactory">Werkspresets</button>
+        </div>
+        <input type="file" id="importInput" accept="application/json" hidden>
+      </section>
+
+      <section class="panel">
+        <h2>Ausgang</h2>
+        <div class="level" title="Doppelklick: 0 dB">
+          <label for="outLevel">Lautstärke</label>
+          <input type="range" id="outLevel" min="-48" max="0" step="0.5" value="0">
+          <output id="outLevelVal" for="outLevel">0.0 dB</output>
+        </div>
+        <p class="hint">Regelt, was du hörst. Aufnahme, Pegelanzeige und Oszilloskop bleiben beim Pedalpegel (den stellst du mit OUTPUT, Shift + MIX).</p>
+        <canvas id="scope" class="scope" aria-hidden="true"></canvas>
+        <div class="preset-row">
+          <button id="recBtn">● Aufnahme starten</button>
+          <button id="recLink" hidden>Aufnahme speichern</button>
+        </div>
+      </section>
+
+      <section class="panel help">
+        <details>
+          <summary>Bedienung</summary>
+          <ul>
+            <li><b>Eingang:</b> „Audio-Eingang“ nimmt jedes Gerät, das der Browser sieht: Audio-Interface, USB-Synths/Drumcomputer (z.&nbsp;B. Syntakt), Mikrofon. Bei Interfaces mit mehreren Eingängen wählst du Kanal 1, 2 oder das Stereopaar. Den Ausgang (z.&nbsp;B. direkt aufs Interface) kannst du in Chrome und Edge wählen.</li>
+            <li><b>Knöpfe:</b> ziehen (hoch/runter), Mausrad oder Pfeiltasten. Shift beim Ziehen = fein. Doppelklick = Standardwert.</li>
+            <li><b>Modul-Taster A–D:</b> Klick wechselt den Effekt, gedrückt halten schaltet das Modul stumm (Bypass). Tastatur: <kbd>1</kbd>–<kbd>4</kbd>.</li>
+            <li><b>Kombinationen</b> wie am Pedal: zwei Taster gleichzeitig halten (z.&nbsp;B. <kbd>1</kbd>+<kbd>2</kbd>) oder die Buttons unter dem Pedal.
+              <br>A+B Shift (Zweitfunktionen in Grau) · C+D Gesture · A+D FX Setup · B+C Preset speichern.</li>
+            <li><b>FX Setup:</b> die vier Modul-Taster in der gewünschten Reihenfolge drücken.</li>
+            <li><b>Gesture:</b> starten, Knöpfe bewegen, stoppen. Die Bewegungen laufen als Schleife weiter. Nochmal aufnehmen = Overdub. Lange auf den Gesture-Button drücken löscht alles.</li>
+            <li><b>TAP:</b> kurz tippen = Tap-Tempo (synchronisiert RATE und Delay-TIME). Gedrückt halten = Capture aufnehmen, loslassen = Loop spielt. Erneut tippen = Loop stoppen. Tastatur: <kbd>Leertaste</kbd>.</li>
+            <li><b>BYPASS:</b> tippen = Effekt an/aus (<kbd>B</kbd>), halten = Presets.</li>
+          </ul>
+        </details>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="foot-note">
+    Fanprojekt, nicht mit Hologram Electronics verbunden. Alle Effekte sind eigene Interpretationen, berechnet in Echtzeit per Web&nbsp;Audio&nbsp;AudioWorklet.
+  </footer>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
