@@ -645,18 +645,18 @@ function wire() {
   });
   $('#presetSave').addEventListener('click', savePreset);
   $('#presetName').addEventListener('keydown', (e) => { if (e.key === 'Enter') savePreset(); });
-  $('#presetDelete').addEventListener('click', () => {
+  confirmButton($('#presetDelete'), () => {
     if (!presets[state.slot]) return;
-    if (!confirm(`${slotName(state.slot)} „${presets[state.slot].name}“ löschen?`)) return;
+    info(`${slotName(state.slot)} geleert`, presets[state.slot].name);
     presets[state.slot] = null; saveAll(presets); renderPresets();
   });
-  $('#presetFactory').addEventListener('click', () => {
-    if (!confirm('Alle Presets durch die Werkspresets ersetzen?')) return;
+  confirmButton($('#presetFactory'), () => {
     presets = resetFactory(); renderPresets();
+    info('Werkspresets wiederhergestellt');
   });
   $('#presetExport').addEventListener('click', () => {
     const blob = new Blob([JSON.stringify({ app: 'chroma-console-web', presets }, null, 1)], { type: 'application/json' });
-    download(blob, 'chroma-console-presets.json');
+    saveFile(blob, 'chroma-console-presets.json');
   });
   $('#presetImport').addEventListener('click', () => $('#importInput').click());
   $('#importInput').addEventListener('change', async (e) => {
@@ -685,12 +685,15 @@ function wire() {
       const blob = await engine.stopRecording();
       btn.textContent = '● Aufnahme starten';
       btn.classList.remove('rec');
-      const link = $('#recLink');
-      link.href = URL.createObjectURL(blob);
-      link.download = `chroma-console-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm'}`;
-      link.hidden = false;
+      lastRec = {
+        blob,
+        name: `chroma-console-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${blob.type.includes('ogg') ? 'ogg' : blob.type.includes('mp4') ? 'm4a' : 'webm'}`,
+      };
+      $('#recLink').hidden = false;
+      info('Aufnahme fertig', `${(blob.size / 1024).toFixed(0)} kB · „Aufnahme speichern“ lädt sie herunter`);
     }
   });
+  $('#recLink').addEventListener('click', () => { if (lastRec) saveFile(lastRec.blob, lastRec.name); });
 
   // keyboard: 1-4 = module buttons (hold two for combos), space = TAP, b = BYPASS
   const keyMod = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, Numpad1: 0, Numpad2: 1, Numpad3: 2, Numpad4: 3 };
@@ -709,7 +712,20 @@ function wire() {
   });
 }
 
-function download(blob, name) {
+let lastRec = null;
+
+// Saves a file. Inside a claude.ai artifact the plain download link is blocked,
+// so the viewer's `downloads` capability is used when it is there.
+async function saveFile(blob, name) {
+  let dl = null;
+  if (window.claude && typeof window.claude.use === 'function') {
+    try { dl = await window.claude.use('downloads'); } catch { dl = null; }
+  }
+  if (dl) {
+    try { await dl.save({ filename: name, data: blob }); info('Gespeichert', name); }
+    catch (e) { if (e && e.code !== 'declined') info('Speichern nicht möglich', (e && (e.message || e.code)) || ''); }
+    return;
+  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
@@ -717,10 +733,31 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
+// Two-step button instead of confirm(): first click arms, second click acts.
+function confirmButton(btn, action) {
+  const label = btn.textContent;
+  let t = null;
+  btn.addEventListener('click', () => {
+    if (btn.dataset.armed) {
+      clearTimeout(t); delete btn.dataset.armed; btn.textContent = label; btn.classList.remove('armed');
+      action();
+      return;
+    }
+    btn.dataset.armed = '1'; btn.textContent = 'Wirklich?'; btn.classList.add('armed');
+    t = setTimeout(() => { delete btn.dataset.armed; btn.textContent = label; btn.classList.remove('armed'); }, 3000);
+  });
+}
+
 /* ------------------------------------------------------------------ */
 
 buildPedal();
 wire();
+if (window.__CHROMA_ARTIFACT) {
+  // claude.ai artifacts have no microphone access; files and demos still work
+  const mic = $('#sources [data-src="mic"]');
+  if (mic) mic.hidden = true;
+  $('#srcHint').textContent = 'In dieser Online-Version gibt es keinen Mikrofon-Eingang. Lade stattdessen eine eigene Audiodatei (z. B. eine DI-Gitarrenspur).';
+}
 // show the first preset's settings on the (still silent) pedal
 (() => {
   const p = presets[0];

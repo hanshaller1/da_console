@@ -204,6 +204,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .preset-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
 .preset-row.small button { font-size: 12px; padding: 5px 8px; }
 .preset-row input { flex: 1; min-width: 0; background: #0b0c18; border: 1px solid var(--line); border-radius: 8px; color: var(--text); padding: 7px 10px; font: inherit; font-size: 13px; }
+.preset-row button.armed { background: var(--red); border-color: var(--red); color: #fff; }
 #recBtn.rec { background: var(--red); border-color: var(--red); color: #fff; }
 .rec-link { color: var(--accent); font-size: 13px; }
 

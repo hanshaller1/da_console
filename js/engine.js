@@ -15,7 +15,9 @@ export class Engine {
     const AC = window.AudioContext || window.webkitAudioContext;
     const ctx = new AC({ latencyHint: 'interactive' });
     this.ctx = ctx;
-    await ctx.audioWorklet.addModule(new URL('../worklet/chroma-processor.js', import.meta.url));
+    // a bundled single-file build passes the worklet in as a blob: URL
+    const url = window.__CHROMA_WORKLET_URL || new URL('../worklet/chroma-processor.js', import.meta.url);
+    await ctx.audioWorklet.addModule(url);
     this.node = new AudioWorkletNode(ctx, 'chroma-console', {
       numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
       channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers',

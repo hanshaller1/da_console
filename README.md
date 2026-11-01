@@ -61,3 +61,12 @@ node test/dsp-test.mjs
 ```
 
 Rendert jeden Effekt mit Standard- und Maximal-Einstellungen sowie zufällige Gesamtketten und prüft auf NaN, Übersteuerung und Echtzeitfähigkeit.
+
+## Einzeldatei-Build
+
+```bash
+node tools/build-single.mjs dist/chroma-console.html            # eigenständige HTML-Datei
+node tools/build-single.mjs dist/chroma-console.html --artifact  # Variante für claude.ai-Artifacts (ohne Mikrofon)
+```
+
+Bündelt alles inklusive Worklet in eine Datei. Auch die muss über http(s) geöffnet werden, weil Browser Worklets von `file://` blockieren.
