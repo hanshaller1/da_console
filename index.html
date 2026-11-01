@@ -74,12 +74,25 @@
         <div class="seg" id="sources">
           <button data-src="guitar">Demo: Gitarre</button>
           <button data-src="drums">Demo: Drums</button>
-          <button data-src="mic">Mikro / Line-In</button>
+          <button data-src="mic">Audio-Eingang</button>
           <button data-src="file">Datei…</button>
           <button data-src="none">Stumm</button>
         </div>
         <input type="file" id="fileInput" accept="audio/*" hidden>
-        <p class="hint" id="srcHint">Bei Mikrofon bitte Kopfhörer benutzen, sonst gibt es Rückkopplungen.</p>
+        <div class="io" id="ioPanel">
+          <label for="inDevice">Gerät</label>
+          <select id="inDevice"><option value="">Standardgerät</option></select>
+          <label for="inChannels">Kanäle</label>
+          <select id="inChannels">
+            <option value="stereo">1+2 stereo</option>
+            <option value="left">1 (links) mono</option>
+            <option value="right">2 (rechts) mono</option>
+            <option value="sum">1+2 als Mono-Summe</option>
+          </select>
+          <label for="outDevice" class="out-only">Ausgang</label>
+          <select id="outDevice" class="out-only"><option value="">Standardgerät</option></select>
+        </div>
+        <p class="hint" id="srcHint">Audio-Interface, Mikrofon oder USB-Geräte wie ein Syntakt: „Audio-Eingang“ drücken, Zugriff erlauben, dann Gerät und Kanäle wählen. Kopfhörer benutzen, sonst koppelt ein Mikrofon zurück.</p>
       </section>
 
       <section class="panel">
@@ -131,6 +144,7 @@
         <details>
           <summary>Bedienung</summary>
           <ul>
+            <li><b>Eingang:</b> „Audio-Eingang“ nimmt jedes Gerät, das der Browser sieht: Audio-Interface, USB-Synths/Drumcomputer (z.&nbsp;B. Syntakt), Mikrofon. Bei Interfaces mit mehreren Eingängen wählst du Kanal 1, 2 oder das Stereopaar. Den Ausgang (z.&nbsp;B. direkt aufs Interface) kannst du in Chrome und Edge wählen.</li>
             <li><b>Knöpfe:</b> ziehen (hoch/runter), Mausrad oder Pfeiltasten. Shift beim Ziehen = fein. Doppelklick = Standardwert.</li>
             <li><b>Modul-Taster A–D:</b> Klick wechselt den Effekt, gedrückt halten schaltet das Modul stumm (Bypass). Tastatur: <kbd>1</kbd>–<kbd>4</kbd>.</li>
             <li><b>Kombinationen</b> wie am Pedal: zwei Taster gleichzeitig halten (z.&nbsp;B. <kbd>1</kbd>+<kbd>2</kbd>) oder die Buttons unter dem Pedal.

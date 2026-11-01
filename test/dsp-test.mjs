@@ -83,5 +83,98 @@ for (let trial = 0; trial < 20; trial++) {
   if (r.bad || r.peak > 1.0) { failures++; console.log('FAIL chain trial', trial, r); }
   else if (trial === 0) console.log(`ok   full chain random x20 (first: ${r.rt.toFixed(0)}x realtime)`);
 }
+/* ---------- regression checks for engine robustness ---------- */
+
+function render(p, seconds, kind) {
+  const inL = new Float32Array(N), out = [new Float32Array(N), new Float32Array(N)];
+  let peak = 0, sumsq = 0, count = 0, finite = true, t = 0;
+  for (let b = 0; b < Math.floor((seconds * SR) / N); b++) {
+    for (let i = 0; i < N; i++, t += 1 / SR) inL[i] = signal(kind, t);
+    p.process([[inL]], [out]);
+    for (let c = 0; c < 2; c++) for (let i = 0; i < N; i++) {
+      const v = out[c][i];
+      if (!Number.isFinite(v)) finite = false;
+      peak = Math.max(peak, Math.abs(v)); sumsq += v * v; count++;
+    }
+  }
+  return { peak, rms: Math.sqrt(sumsq / Math.max(1, count)), finite };
+}
+function check(name, ok, detail = '') {
+  if (ok) console.log(`ok   ${name}`);
+  else { failures++; console.log('FAIL', name, detail); }
+}
+
+{ // garbage parameter values must not reach the DSP
+  const p = new ChromaProcessor();
+  p.msg({ type: 'params', data: { tilt: 'abc', charAmount: NaN, movRate: null, difTime: Infinity, sens: 7, bogus: 1, constructor: 1 } });
+  const r = render(p, 0.5, 'pluck');
+  check('invalid params are ignored or clamped', r.finite && r.rms > 0.01 && p.P.tilt === 0.5 && p.P.sens === 1 && !('bogus' in p.P), JSON.stringify(p.P));
+}
+{ // malformed control messages must not throw or corrupt the routing
+  const p = new ChromaProcessor();
+  let threw = false;
+  try {
+    p.msg({ type: 'select', module: 7, effect: 1 });
+    p.msg({ type: 'select', module: 0, effect: 9 });
+    p.msg({ type: 'moduleBypass', module: '__proto__', on: true });
+    p.msg({ type: 'order', order: [0, 0, 0, 0] });
+    p.msg({ type: 'inputGain', value: 'loud' });
+    p.msg(null);
+  } catch (e) { threw = e; }
+  const r = render(p, 0.3, 'pluck');
+  check('malformed messages are rejected', !threw && r.finite && p.order.join() === '0,1,2,3' && p.inGain === 1 && Object.getPrototypeOf(p.mods).bypassed === undefined, threw);
+}
+{ // a NaN inside a filter must not mute the pedal forever
+  const p = new ChromaProcessor();
+  render(p, 0.2, 'pluck');
+  p.mods[0].ls[0].z1 = NaN;
+  render(p, 0.05, 'pluck');
+  const r = render(p, 0.5, 'pluck');
+  check('engine recovers from an internal NaN', r.finite && r.rms > 0.01, r);
+}
+{ // stopping Capture while it is still recording
+  const p = new ChromaProcessor();
+  p.msg({ type: 'captureRoute', pre: true }); // pre-FX: a NaN here would poison every module
+  p.msg({ type: 'capture', action: 'rec' });
+  render(p, 0.5, 'pluck');
+  p.msg({ type: 'capture', action: 'play' });
+  render(p, 0.3, 'pluck');
+  p.msg({ type: 'capture', action: 'rec' }); // re-capture while the loop plays …
+  p.msg({ type: 'capture', action: 'stop' }); // … and stop before a single sample was written
+  const r = render(p, 0.3, 'pluck');
+  p.msg({ type: 'capture', action: 'rec' });
+  render(p, 0.3, 'pluck');
+  p.msg({ type: 'capture', action: 'stop' });
+  const r1 = render(p, 0.3, 'pluck');
+  p.msg({ type: 'capture', action: 'rec' });
+  render(p, 0.5, 'pluck');
+  p.msg({ type: 'capture', action: 'play' });
+  const r2 = render(p, 0.5, 'silence');
+  check('Capture stop during recording is clean', r.finite && r.rms > 0.01 && r1.finite && r1.rms > 0.01 && p.cap.state === 'play' && r2.finite && r2.rms > 0.01, { r, r1, r2, state: p.cap.state });
+}
+{ // Vibrato at full depth and drift must never read at the write head
+  const p = new ChromaProcessor();
+  for (let k = 0; k < 4; k++) p.mods[k].bypassed = k !== 1;
+  p.mods[1].sel = 1;
+  for (const key of ['movAmount', 'movDrift', 'movRate']) p.P[key] = p.S[key] = 1;
+  const dly = p.mods[1].fx[1].d[0], tap = dly.tap.bind(dly);
+  let minD = Infinity;
+  dly.tap = (d) => { if (d < minD) minD = d; return tap(d); };
+  render(p, 4, 'pluck');
+  check(`Vibrato delay stays above the write head (min ${minD.toFixed(1)} samples)`, minD > 2, minD);
+}
+{ // a delay that was bypassed must not replay old echoes when switched back on
+  const p = new ChromaProcessor();
+  for (let k = 0; k < 4; k++) p.mods[k].bypassed = k !== 2;
+  p.mods[2].sel = 0; // Cascade
+  p.P.difAmount = p.S.difAmount = 0.9;
+  render(p, 1, 'loud');
+  p.msg({ type: 'moduleBypass', module: 2, on: true });
+  render(p, 0.3, 'silence');
+  p.msg({ type: 'moduleBypass', module: 2, on: false });
+  const r = render(p, 1.5, 'silence');
+  check('re-enabled delay starts clean', r.peak < 1e-3, r);
+}
+
 console.log(failures ? `\n${failures} FAILURES` : '\nAll DSP checks passed.');
 process.exit(failures ? 1 : 0);

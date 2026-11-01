@@ -62,15 +62,53 @@ export const FACTORY = [
   },
 ].map((p) => Object.assign({ bypassed: [false, false, false, false], captureRoute: 'post', gesture: null }, p));
 
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+function sanitizeGesture(g) {
+  if (!g || typeof g !== 'object' || !isNum(g.length) || g.length <= 0 || !g.tracks || typeof g.tracks !== 'object') return null;
+  const tracks = {};
+  for (const k of Object.keys(g.tracks)) {
+    if (!hasOwn(DEFAULTS, k) || !Array.isArray(g.tracks[k])) continue;
+    const ev = g.tracks[k]
+      .filter((e) => e && isNum(e.t) && isNum(e.v))
+      .map((e) => ({ t: e.t, v: clamp01(e.v) }))
+      .sort((a, b) => a.t - b.t);
+    if (ev.length) tracks[k] = ev;
+  }
+  if (!Object.keys(tracks).length) return null;
+  return { length: g.length, speed: isNum(g.speed) && g.speed > 0 ? g.speed : 1, tracks };
+}
+
+// Presets come from localStorage or from imported files, so every field is
+// checked: a bad effect index or a string parameter would otherwise crash the
+// UI or push NaN into the audio engine.
+export function sanitizePreset(p) {
+  if (!p || typeof p !== 'object') return null;
+  const params = Object.assign({}, DEFAULTS);
+  if (p.params && typeof p.params === 'object') {
+    for (const k of Object.keys(DEFAULTS)) if (isNum(p.params[k])) params[k] = clamp01(p.params[k]);
+  }
+  const arr = (a) => (Array.isArray(a) ? a : []);
+  const effects = [0, 1, 2, 3].map((m) => { const e = arr(p.effects)[m]; return Number.isInteger(e) && e >= 0 && e < 5 ? e : 0; });
+  const bypassed = [0, 1, 2, 3].map((m) => arr(p.bypassed)[m] === true);
+  const o = arr(p.order);
+  const order = o.length === 4 && [0, 1, 2, 3].every((k) => o.indexOf(k) >= 0) ? o.slice() : [0, 1, 2, 3];
+  const name = (typeof p.name === 'string' || typeof p.name === 'number' ? String(p.name) : '').trim().slice(0, 40) || 'Preset';
+  return { name, params, effects, bypassed, order, captureRoute: p.captureRoute === 'pre' ? 'pre' : 'post', gesture: sanitizeGesture(p.gesture) };
+}
+
 export function loadAll() {
   let data = null;
   try { data = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { data = null; }
   if (!Array.isArray(data) || data.length !== SLOTS) {
     data = new Array(SLOTS).fill(null);
-    FACTORY.forEach((p, i) => { data[i] = structuredClone(p); });
+    // JSON copy instead of structuredClone, which Safari only has since 15.4
+    FACTORY.forEach((p, i) => { data[i] = JSON.parse(JSON.stringify(p)); });
     saveAll(data);
   }
-  return data;
+  return data.map(sanitizePreset);
 }
 
 export function saveAll(data) {
