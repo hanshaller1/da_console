@@ -584,7 +584,7 @@ async function setSource(src) {
 // remembered per browser: which interface, which channels, which output
 const IO_KEY = 'chroma-console-web.io.v1';
 const io = (() => {
-  const d = { inDevice: '', inChannels: 'stereo', outDevice: '' };
+  const d = { inDevice: '', inChannels: 'stereo', outDevice: '', inGainDb: 0, outGainDb: 0 };
   try { return Object.assign(d, JSON.parse(localStorage.getItem(IO_KEY) || '{}')); } catch { return d; }
 })();
 const saveIO = () => { try { localStorage.setItem(IO_KEY, JSON.stringify(io)); } catch { /* storage unavailable */ } };
@@ -620,6 +620,29 @@ async function refreshDevices() {
   };
   fill($('#inDevice'), 'audioinput', io.inDevice, 'Eingang');
   if (engine.canChooseOutput) fill($('#outDevice'), 'audiooutput', io.outDevice, 'Ausgang');
+}
+
+// Input trim and listening volume: two sliders, remembered per browser,
+// usable before power-on (the engine applies them when it starts)
+function wireLevels() {
+  const fmt = (db, min) => (db <= min ? 'aus' : `${db > 0 ? '+' : db < 0 ? '−' : ''}${Math.abs(db).toFixed(1)} dB`);
+  const setup = (id, key, min, max, apply, label) => {
+    const el = $(`#${id}`), out = $(`#${id}Val`);
+    const clampDb = (v) => (Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : 0);
+    const set = (db, announce) => {
+      db = clampDb(db);
+      el.value = String(db);
+      out.textContent = fmt(db, id === 'outLevel' ? min : -Infinity);
+      io[key] = db; saveIO();
+      apply(db);
+      if (announce) info(label, out.textContent);
+    };
+    el.addEventListener('input', () => set(+el.value, true));
+    el.addEventListener('dblclick', () => set(0, true));
+    set(+io[key], false);
+  };
+  setup('inLevel', 'inGainDb', -24, 24, (db) => engine.setInputGain(db), 'EINGANGSPEGEL');
+  setup('outLevel', 'outGainDb', -48, 0, (db) => engine.setOutputGain(db), 'LAUTSTÄRKE');
 }
 
 function wireIO() {
@@ -871,6 +894,7 @@ if (window.__CHROMA_ARTIFACT) {
   $('#srcHint').textContent = 'In dieser Online-Version gibt es keine Live-Eingänge (Audio-Interface, Mikrofon, USB-Geräte). Lade stattdessen eine Audiodatei, z. B. eine DI-Spur. Live spielen geht mit der Version auf GitHub Pages oder lokal.';
 }
 wireIO();
+wireLevels();
 // show the first preset's settings on the (still silent) pedal
 (() => {
   const p = presets[0];

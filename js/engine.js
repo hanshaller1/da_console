@@ -1,5 +1,8 @@
 // Audio plumbing: AudioContext, the DSP worklet, input sources and output recording.
 
+// the lowest slider position (-48 dB and below) means silence
+const dbToGain = (db) => (db <= -48 ? 0 : Math.pow(10, db / 20));
+
 export class Engine {
   constructor() {
     this.ctx = null;
@@ -11,6 +14,8 @@ export class Engine {
     this.recorder = null;
     this.inputNodes = [];
     this.inChannels = 0;
+    this.inGainDb = 0;   // trim in front of the pedal
+    this.outGainDb = 0;  // listening volume, speakers only
   }
 
   async init() {
@@ -40,10 +45,15 @@ export class Engine {
     }
     this.ctx = ctx;
     this.inBus = ctx.createGain();
+    this.inBus.gain.value = dbToGain(this.inGainDb);
     this.inBus.connect(this.node);
     this.out = ctx.createGain();
     this.node.connect(this.out);
-    this.out.connect(ctx.destination);
+    // volume sits only on the way to the speakers: recording and scope keep the pedal level
+    this.vol = ctx.createGain();
+    this.vol.gain.value = dbToGain(this.outGainDb);
+    this.out.connect(this.vol);
+    this.vol.connect(ctx.destination);
     this.analyser = ctx.createAnalyser();
     this.analyser.fftSize = 2048;
     this.analyser.smoothingTimeConstant = 0.75;
@@ -58,6 +68,16 @@ export class Engine {
   wake() {
     const ctx = this.ctx;
     if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') ctx.resume().catch(() => {});
+  }
+
+  setInputGain(db) {
+    this.inGainDb = db;
+    if (this.inBus) this.inBus.gain.setTargetAtTime(dbToGain(db), this.ctx.currentTime, 0.02);
+  }
+
+  setOutputGain(db) {
+    this.outGainDb = db;
+    if (this.vol) this.vol.gain.setTargetAtTime(dbToGain(db), this.ctx.currentTime, 0.02);
   }
 
   send(msg) { if (this.node) this.node.port.postMessage(msg); }

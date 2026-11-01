@@ -79,6 +79,11 @@
           <button data-src="none">Stumm</button>
         </div>
         <input type="file" id="fileInput" accept="audio/*" hidden>
+        <div class="level" title="Doppelklick: 0 dB">
+          <label for="inLevel">Eingangspegel</label>
+          <input type="range" id="inLevel" min="-24" max="24" step="0.5" value="0">
+          <output id="inLevelVal" for="inLevel">0.0 dB</output>
+        </div>
         <div class="io" id="ioPanel">
           <label for="inDevice">Gerät</label>
           <select id="inDevice"><option value="">Standardgerät</option></select>
@@ -133,6 +138,12 @@
 
       <section class="panel">
         <h2>Ausgang</h2>
+        <div class="level" title="Doppelklick: 0 dB">
+          <label for="outLevel">Lautstärke</label>
+          <input type="range" id="outLevel" min="-48" max="0" step="0.5" value="0">
+          <output id="outLevelVal" for="outLevel">0.0 dB</output>
+        </div>
+        <p class="hint">Regelt, was du hörst. Aufnahme, Pegelanzeige und Oszilloskop bleiben beim Pedalpegel (den stellst du mit OUTPUT, Shift + MIX).</p>
         <canvas id="scope" class="scope" aria-hidden="true"></canvas>
         <div class="preset-row">
           <button id="recBtn">● Aufnahme starten</button>
